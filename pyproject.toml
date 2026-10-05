@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "easy-windows-tools"
+version = "2.0.0"
+description = "A terminal-based Windows utility suite"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Robin Güneş" }]
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
+dependencies = [
+    "rich>=13.0.0",
+    "prompt_toolkit>=3.0.0",
+    "mcp>=1.9,<2",
+    "mss>=10,<11",
+    "imageio-ffmpeg>=0.6,<1",
+]
+classifiers = [
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+]
+
+[project.scripts]
+EWT = "easy_windows_tools:main"
+
+[tool.setuptools]
+py-modules = ["easy_windows_tools"]
