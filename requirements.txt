@@ -3,3 +3,5 @@ prompt_toolkit>=3.0.0
 mcp>=1.9,<2
 mss>=10,<11
 imageio-ffmpeg>=0.6,<1
+pyautogui>=0.9.54,<1
+pyperclip>=1.9,<2

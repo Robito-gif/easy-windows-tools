@@ -16,14 +16,21 @@
 
 import ctypes
 import csv
+import errno
 import json
 import os
 import re
 import shlex
+import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
+import urllib.error
+import urllib.request
+import webbrowser
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
 from ctypes import wintypes
@@ -131,7 +138,8 @@ class KeepAwakeApp:
                     '/record --microphone "Mikrofon adı"',
                     '/record --system-audio "Stereo Mix"',
                     "/ekran", "/ekran liste", "/ekran 1", "/ekran 2", "ekran kaydet",
-                    "/MCP create", "/my MCP's",
+                    "/MCP create", "/MCP ayarlar", "/my MCP's",
+                    ">start MCP", ">stop MCP",
                     "/license", "lisans",
                     "/status", "durum",
                     "/help", "yardım", "yardim",
@@ -303,7 +311,7 @@ class KeepAwakeApp:
 
     def show_help(self):
         if not HAS_RICH:
-            print("\nKomutlar:\n  başlat [süre] - Uyku engelini başlatır\n  durdur - Uyanık kalmayı kapatır\n  ekran açık/kapalı - Ekran korumasını ayarlar\n  /ekran [numara] - Kayıt için ekranı seçer; /ekran liste ile görüntüle\n  pomodoro - 25 dk odak oturumu\n  toplantı - 60 dk toplantı oturumu\n  /record [süre] - Ekranı MP4 kaydeder; Ctrl+C ile durdurur\n  /record ayarlar - FPS, çözünürlük, mikrofon ve sistem sesi ayarlarını açar\n  /record [süre] --microphone \"Aygıt\" --system-audio \"Stereo Mix\" - İki ses kaynağını kayda ekler\n  /record [süre] --no-audio - Bu kayıt için ses yakalamayı kapatır\n  çalıştır <komut> - Komut bitene kadar uyanık tutar\n  /MCP create - Bir uygulama için MCP sunucusu oluşturur\n  /my MCP's [ad] - MCP sunucularını ve yapılandırmasını gösterir\n  lisans /license - Telif, garanti ve lisans bilgisini gösterir\n  durum - Sistem durumunu gösterir\n  çıkış - Uygulamadan çıkar\n")
+            print("\nKomutlar:\n  başlat [süre] - Uyku engelini başlatır\n  durdur - Uyanık kalmayı kapatır\n  ekran açık/kapalı - Ekran korumasını ayarlar\n  /ekran [numara] - Kayıt için ekranı seçer; /ekran liste ile görüntüle\n  pomodoro - 25 dk odak oturumu\n  toplantı - 60 dk toplantı oturumu\n  /record [süre] - Ekranı MP4 kaydeder; Ctrl+C ile durdurur\n  /record ayarlar - FPS, çözünürlük, mikrofon ve sistem sesi ayarlarını açar\n  /record [süre] --microphone \"Aygıt\" --system-audio \"Stereo Mix\" - İki ses kaynağını kayda ekler\n  /record [süre] --no-audio - Bu kayıt için ses yakalamayı kapatır\n  çalıştır <komut> - Komut bitene kadar uyanık tutar\n  /MCP create - Bir uygulama için MCP sunucusu oluşturur\n  /MCP ayarlar - Uygulama kataloğu ve güvenlik GUI'sini açar\n  >start MCP <ad> - Yerel MCP sunucusunu başlatır\n  >stop MCP <ad> - Yerel MCP sunucusunu durdurur\n  /my MCP's [ad] - MCP sunucularını ve yapılandırmasını gösterir\n  lisans /license - Telif, garanti ve lisans bilgisini gösterir\n  durum - Sistem durumunu gösterir\n  çıkış - Uygulamadan çıkar\n")
             return
 
         table = Table(box=ROUNDED, border_style=CLAUDE_THEME["secondary"], padding=(0, 1))
@@ -399,6 +407,16 @@ class KeepAwakeApp:
             "",
             "/my MCP's [ad]",
             "Kayıtları ve VS Code / Antigravity yapılandırmasını gösterir"
+        )
+        table.add_row(
+            "",
+            "/MCP ayarlar",
+            "Yüklü uygulamaları, 100 uygulamalı kataloğu ve uygulama bazlı güvenlik ayarlarını açar"
+        )
+        table.add_row(
+            "",
+            ">start MCP <ad>",
+            "Seçilen yerel MCP sunucusunu 127.0.0.1 üzerinde başlatır"
         )
         table.add_section()
         table.add_row(
@@ -952,8 +970,10 @@ class KeepAwakeApp:
         self.print_banner()
 
         if not self.supported:
-            self._print_error("Bu uygulama yalnızca Windows üzerinde çalışmaktadır.")
-            return
+            self._print_info(
+                "Uyku ve ekran güç kontrolleri Windows gerektirir. "
+                "MCP uygulama merkezi ve bu sistemde algılanan paket yöneticileri kullanılabilir."
+            )
 
         while True:
             try:
@@ -967,9 +987,23 @@ class KeepAwakeApp:
 
             normalized = command.lower()
             mcp_lookup = re.fullmatch(r"/my\s+mcp(?:'s|s)(?:\s+(.+))?", command, flags=re.IGNORECASE)
+            mcp_start = re.fullmatch(r">start\s+mcp\s+(.+)", command, flags=re.IGNORECASE)
+            mcp_stop = re.fullmatch(r">stop\s+mcp\s+(.+)", command, flags=re.IGNORECASE)
 
             if normalized in {"/mcp create", "mcp create"}:
                 self.mcp_manager.create_interactive()
+            elif normalized in {"/mcp ayarlar", "/mcp settings", "mcp ayarlar"}:
+                self.mcp_manager.open_settings_gui()
+            elif mcp_start:
+                try:
+                    self._print_info(self.mcp_manager.start_mcp_server(mcp_start.group(1).strip()))
+                except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                    self._print_error(f"MCP sunucusu başlatılamadı: {error}")
+            elif mcp_stop:
+                try:
+                    self._print_info(self.mcp_manager.stop_mcp_server(mcp_stop.group(1).strip()))
+                except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                    self._print_error(f"MCP sunucusu durdurulamadı: {error}")
             elif mcp_lookup:
                 self.mcp_manager.show_servers(mcp_lookup.group(1))
 
@@ -1540,6 +1574,183 @@ class ScreenRecorder:
             raise
 
 
+# Package-manager search is used for the broader catalog so package identifiers
+# stay current instead of being hard-coded from a stale package list.
+MCP_APPLICATION_CATALOG = tuple(line.strip() for line in """
+Godot
+Unity Hub
+Unreal Engine
+Blender
+Google Chrome
+Visual Studio
+Visual Studio Code
+MCreator
+SQLite
+Blockbench
+IntelliJ IDEA
+PyCharm
+Android Studio
+Eclipse IDE
+JetBrains Rider
+WebStorm
+CLion
+GoLand
+PhpStorm
+DataGrip
+Git
+GitHub Desktop
+GitKraken
+Docker Desktop
+Podman Desktop
+Postman
+Insomnia
+DBeaver
+DB Browser for SQLite
+pgAdmin
+MySQL Workbench
+MongoDB Compass
+Redis Insight
+Beekeeper Studio
+Figma
+GIMP
+Krita
+Inkscape
+Affinity Photo
+DaVinci Resolve
+OBS Studio
+Audacity
+Shotcut
+Kdenlive
+HandBrake
+VLC
+7-Zip
+WinRAR
+Everything
+PowerToys
+ShareX
+Notepad++
+Sublime Text
+Firefox
+Brave
+Vivaldi
+Microsoft Edge
+Opera
+Discord
+Slack
+Zoom
+Microsoft Teams
+Telegram
+Signal
+Spotify
+Steam
+Epic Games Launcher
+GOG Galaxy
+Heroic Games Launcher
+Lutris
+Minecraft Launcher
+Prism Launcher
+CurseForge
+Java
+Python
+Node.js
+.NET SDK
+Rust
+Go
+CMake
+Ninja
+LLVM
+GCC
+OpenJDK
+Maven
+Gradle
+Flutter
+Dart
+XAMPP
+Apache NetBeans
+Qt Creator
+VSCodium
+Zed
+Cursor
+Windsurf
+RStudio
+TeXstudio
+KeePassXC
+qBittorrent
+FileZilla
+""".splitlines() if line.strip())
+assert len(MCP_APPLICATION_CATALOG) == 100
+
+MCP_APP_PACKAGE_IDS = {
+    "Godot": {"winget": "GodotEngine.GodotEngine", "apt": "godot3", "snap": "godot", "pacman": "godot", "brew": "godot"},
+    "Unity Hub": {"winget": "Unity.UnityHub", "brew": "unity-hub"},
+    "Blender": {"winget": "BlenderFoundation.Blender", "apt": "blender", "snap": "blender", "pacman": "blender", "brew": "blender"},
+    "Google Chrome": {"winget": "Google.Chrome", "apt": "google-chrome-stable", "brew": "google-chrome"},
+    "Visual Studio": {"winget": "Microsoft.VisualStudio.2022.Community"},
+    "Visual Studio Code": {"winget": "Microsoft.VisualStudioCode", "apt": "code", "snap": "code", "pacman": "visual-studio-code-bin", "brew": "visual-studio-code"},
+    "MCreator": {"winget": "MCreator.MCreator"},
+    "SQLite": {"winget": "SQLite.SQLite", "apt": "sqlite3", "pacman": "sqlite", "brew": "sqlite"},
+    "Blockbench": {"winget": "Blockbench.Blockbench", "brew": "blockbench"},
+    "IntelliJ IDEA": {"winget": "JetBrains.IntelliJIDEA.Community", "snap": "intellij-idea-community", "pacman": "intellij-idea-community-edition", "brew": "intellij-idea-ce"},
+    "PyCharm": {"winget": "JetBrains.PyCharm.Community", "snap": "pycharm-community", "pacman": "pycharm-community-edition", "brew": "pycharm-ce"},
+    "Android Studio": {"winget": "Google.AndroidStudio", "snap": "android-studio", "pacman": "android-studio", "brew": "android-studio"},
+    "Docker Desktop": {"winget": "Docker.DockerDesktop", "brew": "docker"},
+    "Git": {"winget": "Git.Git", "apt": "git", "snap": "git", "pacman": "git", "brew": "git"},
+    "Firefox": {"winget": "Mozilla.Firefox", "apt": "firefox", "snap": "firefox", "pacman": "firefox", "brew": "firefox"},
+    "VLC": {"winget": "VideoLAN.VLC", "apt": "vlc", "snap": "vlc", "pacman": "vlc", "brew": "vlc"},
+    "GIMP": {"winget": "GIMP.GIMP", "apt": "gimp", "snap": "gimp", "pacman": "gimp", "brew": "gimp"},
+    "Krita": {"winget": "KDE.Krita", "apt": "krita", "snap": "krita", "pacman": "krita", "brew": "krita"},
+    "OBS Studio": {"winget": "OBSProject.OBSStudio", "apt": "obs-studio", "snap": "obs-studio", "pacman": "obs-studio", "brew": "obs"},
+    "Audacity": {"winget": "Audacity.Audacity", "apt": "audacity", "snap": "audacity", "pacman": "audacity", "brew": "audacity"},
+    "Steam": {"winget": "Valve.Steam", "apt": "steam", "pacman": "steam", "brew": "steam"},
+    "7-Zip": {"winget": "7zip.7zip", "apt": "7zip", "pacman": "7zip", "brew": "sevenzip"},
+    "Notepad++": {"winget": "Notepad++.Notepad++", "snap": "notepad-plus-plus", "brew": "notepad-plus-plus"},
+    "Postman": {"winget": "Postman.Postman", "snap": "postman", "pacman": "postman", "brew": "postman"},
+    "DBeaver": {"winget": "DBeaver.DBeaver.Community", "apt": "dbeaver-ce", "snap": "dbeaver-ce", "pacman": "dbeaver", "brew": "dbeaver-community"},
+    "DB Browser for SQLite": {"winget": "DBBrowserForSQLite.DBBrowserForSQLite", "apt": "sqlitebrowser", "pacman": "sqlitebrowser", "brew": "db-browser-for-sqlite"},
+    "Discord": {"winget": "Discord.Discord", "snap": "discord", "pacman": "discord", "brew": "discord"},
+    "Telegram": {"winget": "Telegram.TelegramDesktop", "apt": "telegram-desktop", "snap": "telegram-desktop", "pacman": "telegram-desktop", "brew": "telegram"},
+    "qBittorrent": {"winget": "qBittorrent.qBittorrent", "apt": "qbittorrent", "snap": "qbittorrent-arnatious", "pacman": "qbittorrent", "brew": "qbittorrent"},
+    "KeePassXC": {"winget": "KeePassXCTeam.KeePassXC", "apt": "keepassxc", "snap": "keepassxc", "pacman": "keepassxc", "brew": "keepassxc"},
+}
+
+MCP_APP_COMMANDS = {
+    "Godot": ["godot", "godot4", "godot3"],
+    "Blender": ["blender"],
+    "Google Chrome": ["google-chrome", "chrome", "chromium", "chromium-browser"],
+    "Visual Studio Code": ["code", "code-insiders"],
+    "MCreator": ["mcreator"],
+    "SQLite": ["sqlite3"],
+    "Blockbench": ["blockbench"],
+    "IntelliJ IDEA": ["idea", "idea-community"],
+    "PyCharm": ["pycharm", "pycharm-community"],
+    "Android Studio": ["studio"],
+    "Git": ["git"],
+    "Docker Desktop": ["docker"],
+    "Firefox": ["firefox"],
+    "VLC": ["vlc"],
+    "GIMP": ["gimp"],
+    "Krita": ["krita"],
+    "OBS Studio": ["obs", "obs-studio"],
+    "Audacity": ["audacity"],
+    "Steam": ["steam"],
+}
+
+MCP_APP_DOWNLOAD_PAGES = {
+    "Godot": "https://godotengine.org/download/macos/",
+    "Unity Hub": "https://unity.com/download",
+    "Unreal Engine": "https://www.unrealengine.com/download",
+    "Blender": "https://www.blender.org/download/",
+    "Google Chrome": "https://www.google.com/chrome/",
+    "Visual Studio Code": "https://code.visualstudio.com/download",
+    "MCreator": "https://mcreator.net/download",
+    "SQLite": "https://www.sqlite.org/download.html",
+    "Blockbench": "https://www.blockbench.net/download",
+    "IntelliJ IDEA": "https://www.jetbrains.com/idea/download/",
+    "PyCharm": "https://www.jetbrains.com/pycharm/download/",
+    "Android Studio": "https://developer.android.com/studio",
+}
+
+
 class MCPManager:
     def __init__(self, console=None, db_path=None, script_path=None, python_path=None):
         self.console = console
@@ -1583,6 +1794,21 @@ class MCPManager:
                     PRIMARY KEY (server_id, pid)
                 )"""
             )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS running_mcp_servers (
+                    server_id INTEGER PRIMARY KEY REFERENCES mcp_servers(id) ON DELETE CASCADE,
+                    pid INTEGER NOT NULL,
+                    port INTEGER NOT NULL,
+                    started_at TEXT NOT NULL
+                )"""
+            )
+            columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(mcp_servers)")
+            }
+            if "settings" not in columns:
+                connection.execute(
+                    "ALTER TABLE mcp_servers ADD COLUMN settings TEXT NOT NULL DEFAULT '{}'"
+                )
 
     @staticmethod
     def _display_icon_executable(value):
@@ -1601,47 +1827,236 @@ class MCPManager:
 
     @classmethod
     def discover_applications(cls):
-        if os.name != "nt":
-            return []
-        import winreg
-
         applications = {}
-        uninstall_key = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
-        registry_views = [0]
-        if hasattr(winreg, "KEY_WOW64_64KEY"):
-            registry_views.extend([winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY])
-        registry_roots = [winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE]
-        for root in registry_roots:
-            for view in dict.fromkeys(registry_views):
-                try:
-                    root_key = winreg.OpenKey(root, uninstall_key, 0, winreg.KEY_READ | view)
-                except OSError:
+        if os.name == "nt":
+            import winreg
+
+            uninstall_key = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+            registry_views = [0]
+            if hasattr(winreg, "KEY_WOW64_64KEY"):
+                registry_views.extend([winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY])
+            registry_roots = [winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE]
+            for root in registry_roots:
+                for view in dict.fromkeys(registry_views):
+                    try:
+                        root_key = winreg.OpenKey(root, uninstall_key, 0, winreg.KEY_READ | view)
+                    except OSError:
+                        continue
+                    with root_key:
+                        for index in range(winreg.QueryInfoKey(root_key)[0]):
+                            try:
+                                subkey_name = winreg.EnumKey(root_key, index)
+                                with winreg.OpenKey(root_key, subkey_name) as subkey:
+                                    name = winreg.QueryValueEx(subkey, "DisplayName")[0]
+                                    try:
+                                        display_icon = winreg.QueryValueEx(subkey, "DisplayIcon")[0]
+                                    except OSError:
+                                        display_icon = ""
+                                    try:
+                                        is_system_component = winreg.QueryValueEx(subkey, "SystemComponent")[0] == 1
+                                    except OSError:
+                                        is_system_component = False
+                            except (OSError, TypeError):
+                                continue
+                            if is_system_component:
+                                continue
+                            executable = cls._display_icon_executable(display_icon)
+                            if not executable:
+                                continue
+                            key = os.path.normcase(executable)
+                            applications.setdefault(key, {
+                                "name": str(name).strip(),
+                                "executable": executable,
+                                "source": "Windows uygulama kayıt defteri",
+                            })
+            app_paths_key = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths"
+            for root in registry_roots:
+                for view in dict.fromkeys(registry_views):
+                    try:
+                        root_key = winreg.OpenKey(root, app_paths_key, 0, winreg.KEY_READ | view)
+                    except OSError:
+                        continue
+                    with root_key:
+                        for index in range(winreg.QueryInfoKey(root_key)[0]):
+                            try:
+                                with winreg.OpenKey(root_key, winreg.EnumKey(root_key, index)) as subkey:
+                                    executable_value = winreg.QueryValueEx(subkey, None)[0]
+                            except OSError:
+                                continue
+                            executable = cls._display_icon_executable(str(executable_value))
+                            if not executable:
+                                continue
+                            applications.setdefault(os.path.normcase(executable), {
+                                "name": Path(executable).stem,
+                                "executable": executable,
+                                "source": "Windows App Paths kayıt defteri",
+                            })
+        elif sys.platform == "darwin":
+            app_directories = [Path("/Applications"), Path.home() / "Applications"]
+            for directory in app_directories:
+                if not directory.is_dir():
                     continue
-                with root_key:
-                    for index in range(winreg.QueryInfoKey(root_key)[0]):
-                        try:
-                            subkey_name = winreg.EnumKey(root_key, index)
-                            with winreg.OpenKey(root_key, subkey_name) as subkey:
-                                name = winreg.QueryValueEx(subkey, "DisplayName")[0]
-                                display_icon = winreg.QueryValueEx(subkey, "DisplayIcon")[0]
-                                try:
-                                    is_system_component = winreg.QueryValueEx(subkey, "SystemComponent")[0] == 1
-                                except OSError:
-                                    is_system_component = False
-                        except (OSError, TypeError):
-                            continue
-                        if is_system_component:
-                            continue
-                        executable = cls._display_icon_executable(display_icon)
-                        if not executable:
-                            continue
-                        key = os.path.normcase(executable)
-                        applications.setdefault(key, {
-                            "name": str(name).strip(),
-                            "executable": executable,
-                            "source": "Windows uygulama kayıt defteri",
+                for app_path in directory.glob("*.app"):
+                    applications[str(app_path.resolve()).casefold()] = {
+                        "name": app_path.stem,
+                        "executable": f"@open:{app_path.resolve()}",
+                        "source": "macOS Applications",
+                    }
+        else:
+            desktop_directories = [
+                Path("/usr/share/applications"),
+                Path("/usr/local/share/applications"),
+                Path.home() / ".local/share/applications",
+            ]
+            for directory in desktop_directories:
+                if not directory.is_dir():
+                    continue
+                for desktop_file in directory.rglob("*.desktop"):
+                    try:
+                        text = desktop_file.read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        continue
+                    if re.search(r"(?m)^NoDisplay=true\s*$", text, flags=re.IGNORECASE):
+                        continue
+                    name_match = re.search(r"(?m)^Name(?:\[[^]]+\])?=(.+)$", text)
+                    exec_match = re.search(r"(?m)^Exec=(.+)$", text)
+                    if not name_match or not exec_match:
+                        continue
+                    name = name_match.group(1).strip()
+                    executable = shlex.split(exec_match.group(1).strip())[0]
+                    command = shutil.which(executable)
+                    if not command:
+                        continue
+                    applications[name.casefold()] = {
+                        "name": name,
+                        "executable": command,
+                        "source": str(desktop_file),
+                    }
+            for app_name, commands in MCP_APP_COMMANDS.items():
+                for command in commands:
+                    path = shutil.which(command)
+                    if path:
+                        applications.setdefault(app_name.casefold(), {
+                            "name": app_name,
+                            "executable": path,
+                            "source": "PATH",
                         })
+                        break
         return sorted(applications.values(), key=lambda item: item["name"].casefold())
+
+    @staticmethod
+    def available_package_managers():
+        if os.name == "nt":
+            return ["winget"] if shutil.which("winget") else []
+        if sys.platform == "darwin":
+            return ["brew"] if shutil.which("brew") else []
+        if not sys.platform.startswith("linux"):
+            return []
+
+        os_release = {}
+        try:
+            for line in Path("/etc/os-release").read_text(encoding="utf-8").splitlines():
+                key, separator, value = line.partition("=")
+                if separator:
+                    os_release[key] = value.strip('"')
+        except OSError:
+            pass
+        distro = (os_release.get("ID", "") + " " + os_release.get("ID_LIKE", "")).lower()
+        managers = []
+        if shutil.which("apt-get") and ("debian" in distro or "ubuntu" in distro or "linuxmint" in distro):
+            managers.append("apt")
+        if shutil.which("snap"):
+            managers.append("snap")
+        if shutil.which("pacman") and ("arch" in distro or "garuda" in distro or not distro):
+            managers.append("pacman")
+        return managers
+
+    @staticmethod
+    def _run_package_search(manager, query):
+        if manager == "winget":
+            command = ["winget", "search", "--query", query, "--accept-source-agreements"]
+        elif manager == "apt":
+            command = ["apt-cache", "search", "--names-only", query]
+        elif manager == "snap":
+            command = ["snap", "find", query]
+        elif manager == "pacman":
+            command = ["pacman", "-Ss", query]
+        elif manager == "brew":
+            command = ["brew", "search", "--casks", query]
+        else:
+            raise ValueError(f"Desteklenmeyen paket yöneticisi: {manager}")
+        result = subprocess.run(
+            command, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=45, check=False,
+        )
+        if result.returncode and not result.stdout.strip():
+            detail = result.stderr.strip() or f"çıkış kodu {result.returncode}"
+            raise RuntimeError(f"{manager} paket araması başarısız: {detail}")
+        candidates = []
+        if manager == "winget":
+            for line in result.stdout.splitlines():
+                match = re.match(r"^\s*(.+?)\s{2,}([A-Za-z0-9][A-Za-z0-9._+-]+)\s{2,}", line)
+                if match and match.group(2).lower() not in {"id", "version", "unknown"}:
+                    candidates.append({"name": match.group(1).strip(), "id": match.group(2)})
+        elif manager == "apt":
+            for line in result.stdout.splitlines():
+                package, separator, description = line.partition(" - ")
+                if separator and package:
+                    candidates.append({"name": description.strip(), "id": package.strip()})
+        elif manager == "snap":
+            for line in result.stdout.splitlines():
+                match = re.match(r"^\s*([A-Za-z0-9][A-Za-z0-9._+-]+)\s{2,}(.+?)\s{2,}", line)
+                if match and match.group(1).lower() not in {"name", "snap"}:
+                    candidates.append({"name": match.group(2).strip(), "id": match.group(1)})
+        elif manager == "pacman":
+            for line in result.stdout.splitlines():
+                match = re.match(r"^[^/\s]+/([A-Za-z0-9@._+-]+)\s+(.+)$", line.strip())
+                if match:
+                    candidates.append({"name": match.group(2).strip(), "id": match.group(1)})
+        elif manager == "brew":
+            for line in result.stdout.splitlines():
+                package = line.strip()
+                if package and not package.startswith(("==>", "Warning:")):
+                    candidates.append({"name": package, "id": package})
+        unique = {}
+        for candidate in candidates:
+            unique.setdefault(candidate["id"].casefold(), candidate)
+        return list(unique.values())[:100]
+
+    @classmethod
+    def search_catalog_packages(cls, app_name, manager):
+        candidates = cls._run_package_search(manager, app_name)
+        package_id = MCP_APP_PACKAGE_IDS.get(app_name, {}).get(manager)
+        if package_id:
+            verified = [
+                item for item in candidates
+                if item["id"].casefold() == package_id.casefold()
+            ]
+            if verified:
+                return verified
+        return candidates
+
+    @staticmethod
+    def install_package(manager, package_id):
+        if manager == "winget":
+            command = [
+                "winget", "install", "--id", package_id, "--exact",
+                "--accept-source-agreements", "--accept-package-agreements",
+            ]
+        elif manager == "apt":
+            command = ["pkexec", "apt-get", "install", "-y", package_id] if shutil.which("pkexec") else ["sudo", "apt-get", "install", "-y", package_id]
+        elif manager == "snap":
+            command = ["pkexec", "snap", "install", package_id] if shutil.which("pkexec") else ["sudo", "snap", "install", package_id]
+        elif manager == "pacman":
+            command = ["pkexec", "pacman", "-S", "--needed", "--noconfirm", package_id] if shutil.which("pkexec") else ["sudo", "pacman", "-S", "--needed", "--noconfirm", package_id]
+        elif manager == "brew":
+            command = ["brew", "install", "--cask", package_id]
+        else:
+            raise ValueError(f"Desteklenmeyen paket yöneticisi: {manager}")
+        return subprocess.run(
+            command, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=1800, check=False,
+        )
 
     @staticmethod
     def _server_key(name):
@@ -1654,17 +2069,23 @@ class MCPManager:
             "command": self.python_path,
             "args": [str(self.script_path), "--mcp-server", str(server_id)],
         }
+        port = 8800 + ((server_id - 1) % (65535 - 8800))
+        url = f"http://127.0.0.1:{port}/mcp"
         return {
             "vscode": {"servers": {key: {"type": "stdio", **command}}},
             "antigravity": {"mcpServers": {key: command}},
+            "http": {"url": url},
         }
 
     def create_server(self, name, app):
         name = name.strip()
-        executable = str(Path(app["executable"]).resolve())
+        executable = str(app["executable"])
         if not name:
             raise ValueError("MCP sunucusu için bir ad girin.")
-        if not Path(executable).is_file():
+        if executable.startswith("@open:"):
+            if not Path(executable.removeprefix("@open:")).exists():
+                raise ValueError("Uygulama dosyası bulunamadı.")
+        elif not Path(executable).is_file() and not shutil.which(executable):
             raise ValueError("Uygulamanın çalıştırılabilir dosyası bulunamadı.")
         created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._connect() as connection:
@@ -1681,6 +2102,289 @@ class MCPManager:
                 (json.dumps(configuration, ensure_ascii=False, indent=2), server_id),
             )
         return self.get_server(name)
+
+    @staticmethod
+    def default_server_settings():
+        return {
+            "allow_app_status": False,
+            "allow_launch_application": False,
+            "allow_close_application": False,
+            "allow_screen_capture": False,
+            "allow_input_control": False,
+        }
+
+    def server_settings(self, server):
+        latest_server = self.get_server_by_id(server["id"])
+        if latest_server:
+            server = latest_server
+        try:
+            stored = json.loads(server.get("settings") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            stored = {}
+        settings = self.default_server_settings()
+        if not isinstance(stored, dict):
+            stored = {}
+        for key in settings:
+            value = stored.get(key, False)
+            settings[key] = value if type(value) is bool else False
+        return settings
+
+    def update_server_settings(self, server_id, **settings):
+        allowed_keys = set(self.default_server_settings())
+        if (
+            not settings
+            or set(settings) - allowed_keys
+            or any(type(value) is not bool for value in settings.values())
+        ):
+            raise ValueError("Geçersiz MCP güvenlik ayarı.")
+        server = self.get_server_by_id(server_id)
+        if not server:
+            raise ValueError("MCP sunucusu bulunamadı.")
+        current = self.server_settings(server)
+        current.update(settings)
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE mcp_servers SET settings = ? WHERE id = ?",
+                (json.dumps(current), server_id),
+            )
+        return current
+
+    def start_mcp_server(self, name):
+        server = self.get_server(name)
+        if not server:
+            raise ValueError(f"'{name}' adında yerel MCP sunucusu kayıtlı değil.")
+        with self._connect() as connection:
+            running = connection.execute(
+                "SELECT pid, port FROM running_mcp_servers WHERE server_id = ?",
+                (server["id"],),
+            ).fetchone()
+        if running:
+            if not self._pid_exists(running["pid"]):
+                with self._connect() as connection:
+                    connection.execute(
+                        "DELETE FROM running_mcp_servers WHERE server_id = ?",
+                        (server["id"],),
+                    )
+            else:
+                url = f"http://127.0.0.1:{running['port']}/mcp"
+                if self._mcp_http_handshake(url, server["name"]):
+                    return f"{server['name']} MCP sunucusu zaten çalışıyor: {url}"
+                raise RuntimeError(
+                    f"Kayıtlı MCP süreci çalışıyor ancak {url} MCP olarak yanıt vermiyor."
+                )
+
+        port = 8800 + ((server["id"] - 1) % (65535 - 8800))
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+                listener.bind(("127.0.0.1", port))
+        except OSError as error:
+            raise RuntimeError(
+                f"127.0.0.1:{port} bağlantı noktası kullanımda; MCP sunucusu başlatılmadı."
+            ) from error
+        command = [
+            self.python_path, str(self.script_path), "--mcp-server", str(server["id"]),
+            "--transport", "streamable-http", "--port", str(port),
+        ]
+        creationflags = 0
+        popen_options = {}
+        if os.name == "nt":
+            creationflags = (
+                getattr(subprocess, "DETACHED_PROCESS", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            )
+        else:
+            popen_options["start_new_session"] = True
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            creationflags=creationflags,
+            **popen_options,
+        )
+        deadline = time.monotonic() + 20
+        url = f"http://127.0.0.1:{port}/mcp"
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise RuntimeError(
+                    f"MCP süreci başlatılamadı (çıkış kodu {process.returncode})."
+                )
+            if self._mcp_http_handshake(url, server["name"]):
+                break
+            time.sleep(0.1)
+        else:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            raise RuntimeError(
+                f"MCP sunucusu {url} adresinde zamanında MCP yanıtı vermedi."
+            )
+        with self._connect() as connection:
+            connection.execute(
+                """INSERT OR REPLACE INTO running_mcp_servers
+                   (server_id, pid, port, started_at) VALUES (?, ?, ?, ?)""",
+                (server["id"], process.pid, port, datetime.now(timezone.utc).isoformat(timespec="seconds")),
+            )
+        return f"{server['name']} MCP sunucusu çalışıyor: {url}"
+
+    @staticmethod
+    def _mcp_http_handshake(url, expected_name):
+        protocol_version = "2025-03-26"
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": protocol_version,
+                "capabilities": {},
+                "clientInfo": {"name": "easy-windows-tools-healthcheck", "version": APP_VERSION},
+            },
+        }
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=1) as response:
+                body = response.read(65536).decode("utf-8", errors="replace")
+                session_id = response.headers.get("Mcp-Session-Id")
+        except (OSError, urllib.error.URLError, urllib.error.HTTPError):
+            return False
+        try:
+            message = json.loads(body)
+        except json.JSONDecodeError:
+            message = None
+            for line in body.splitlines():
+                if line.startswith("data:"):
+                    try:
+                        message = json.loads(line.partition(":")[2].strip())
+                    except json.JSONDecodeError:
+                        continue
+                    if message:
+                        break
+        if not isinstance(message, dict):
+            return False
+        result = message.get("result")
+        if not isinstance(result, dict):
+            return False
+        server_info = result.get("serverInfo")
+        if not isinstance(server_info, dict) or server_info.get("name") != expected_name:
+            return False
+        negotiated_version = result.get("protocolVersion")
+        if not isinstance(negotiated_version, str):
+            return False
+
+        notification_headers = {
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+            "MCP-Protocol-Version": negotiated_version,
+        }
+        if isinstance(session_id, str) and session_id:
+            notification_headers["Mcp-Session-Id"] = session_id
+        initialized_notification = urllib.request.Request(
+            url,
+            data=json.dumps({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+            }).encode("utf-8"),
+            headers=notification_headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(initialized_notification, timeout=1):
+                pass
+        except (OSError, urllib.error.URLError, urllib.error.HTTPError):
+            return False
+        if isinstance(session_id, str) and session_id:
+            close_session = urllib.request.Request(
+                url,
+                headers={
+                    "Mcp-Session-Id": session_id,
+                    "MCP-Protocol-Version": negotiated_version,
+                },
+                method="DELETE",
+            )
+            try:
+                with urllib.request.urlopen(close_session, timeout=1):
+                    pass
+            except urllib.error.HTTPError as error:
+                if error.code not in {404, 405}:
+                    return False
+            except (OSError, urllib.error.URLError):
+                return False
+        return True
+
+    @staticmethod
+    def _pid_exists(pid):
+        try:
+            os.kill(pid, 0)
+        except OSError as error:
+            if error.errno == errno.ESRCH or getattr(error, "winerror", None) == 87:
+                return False
+            return True
+        return True
+
+    def stop_mcp_server(self, name):
+        server = self.get_server(name)
+        if not server:
+            raise ValueError(f"'{name}' adında yerel MCP sunucusu kayıtlı değil.")
+        with self._connect() as connection:
+            running = connection.execute(
+                "SELECT pid, port FROM running_mcp_servers WHERE server_id = ?",
+                (server["id"],),
+            ).fetchone()
+        if not running:
+            return f"{server['name']} MCP sunucusu bu uygulama oturumunda çalışmıyor."
+        url = f"http://127.0.0.1:{running['port']}/mcp"
+        if not self._pid_exists(running["pid"]):
+            with self._connect() as connection:
+                connection.execute(
+                    "DELETE FROM running_mcp_servers WHERE server_id = ?",
+                    (server["id"],),
+                )
+            return f"{server['name']} MCP süreci artık çalışmıyor; eski süreç kaydı temizlendi."
+        if not self._mcp_http_handshake(url, server["name"]):
+            with self._connect() as connection:
+                connection.execute(
+                    "DELETE FROM running_mcp_servers WHERE server_id = ?",
+                    (server["id"],),
+                )
+            raise RuntimeError(
+                f"{url} beklenen MCP sunucusu olarak doğrulanamadı; "
+                "başka bir süreç sonlandırılmadı ve eski süreç kaydı temizlendi."
+            )
+        try:
+            if os.name == "nt":
+                result = subprocess.run(
+                    ["taskkill", "/PID", str(running["pid"]), "/T", "/F"],
+                    capture_output=True, text=True, encoding="mbcs", errors="replace", check=False,
+                )
+                if result.returncode:
+                    if (
+                        self._pid_exists(running["pid"])
+                        or self._mcp_http_handshake(url, server["name"])
+                    ):
+                        raise RuntimeError(result.stderr.strip() or "taskkill başarısız oldu.")
+            else:
+                os.kill(running["pid"], 15)
+        except OSError as error:
+            raise RuntimeError(f"MCP sunucusu durdurulamadı: {error}") from error
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM running_mcp_servers WHERE server_id = ?",
+                (server["id"],),
+            )
+        return f"{server['name']} MCP sunucusu durduruldu."
 
     def get_server(self, name):
         with self._connect() as connection:
@@ -1728,6 +2432,345 @@ class MCPManager:
             return
         self._print_success(f"'{server['name']}' MCP sunucusu SQLite'a kaydedildi.")
         self._show_server(server)
+
+    def open_settings_gui(self):
+        try:
+            import tkinter as tk
+            from tkinter import messagebox, simpledialog, ttk
+        except ImportError as error:
+            self._print_error(f"MCP grafik arayüzü açılamadı: {error}")
+            return
+
+        root = tk.Tk()
+        root.title("Easy Windows Tools · MCP uygulama merkezi")
+        root.geometry("1120x720")
+        root.minsize(900, 560)
+        style = ttk.Style(root)
+        if "vista" in style.theme_names():
+            style.theme_use("vista")
+        notebook = ttk.Notebook(root)
+        notebook.pack(fill="both", expand=True, padx=12, pady=12)
+
+        installed_tab = ttk.Frame(notebook, padding=12)
+        catalog_tab = ttk.Frame(notebook, padding=12)
+        security_tab = ttk.Frame(notebook, padding=12)
+        notebook.add(installed_tab, text="Yüklü uygulamalar")
+        notebook.add(catalog_tab, text="100 uygulamalı katalog")
+        notebook.add(security_tab, text="MCP güvenlik ayarları")
+
+        installed_tree = ttk.Treeview(
+            installed_tab, columns=("source", "path"), show="tree headings", height=20,
+        )
+        installed_tree.heading("source", text="Kaynak")
+        installed_tree.heading("path", text="Başlatma yolu")
+        installed_tree.column("source", width=230, stretch=False)
+        installed_tree.column("path", width=660)
+        installed_tree.pack(fill="both", expand=True)
+        installed_apps = self.discover_applications()
+        for app in installed_apps:
+            installed_tree.insert(
+                "", "end", iid=app["executable"],
+                values=(app["source"], app["executable"]), text=app["name"],
+            )
+        installed_tree["displaycolumns"] = ("source", "path")
+        installed_tree.heading("#0", text="Uygulama")
+        installed_tree.column("#0", width=240, stretch=False)
+
+        def refresh_installed_apps():
+            nonlocal installed_apps
+            installed_apps = self.discover_applications()
+            installed_tree.delete(*installed_tree.get_children())
+            for app in installed_apps:
+                installed_tree.insert(
+                    "", "end", iid=app["executable"],
+                    values=(app["source"], app["executable"]), text=app["name"],
+                )
+            installed_count.configure(text=f"Bulunan uygulama: {len(installed_apps)}")
+
+        installed_actions = ttk.Frame(installed_tab)
+        installed_actions.pack(fill="x", pady=(10, 0))
+        ttk.Button(
+            installed_actions,
+            text="Seçili uygulama için MCP oluştur",
+            command=lambda: create_server_for_selected(),
+        ).pack(side="left")
+        ttk.Button(
+            installed_actions, text="Yüklü uygulama listesini yenile",
+            command=refresh_installed_apps,
+        ).pack(side="left", padx=6)
+        installed_count = ttk.Label(
+            installed_actions,
+            text=f"Bulunan uygulama: {len(installed_apps)}",
+        )
+        installed_count.pack(side="right")
+
+        catalog_frame = ttk.Frame(catalog_tab)
+        catalog_frame.pack(fill="both", expand=True)
+        catalog_tree = ttk.Treeview(
+            catalog_frame, columns=("platform",), show="tree headings", height=20,
+        )
+        catalog_tree.heading("#0", text="Uygulama")
+        catalog_tree.heading("platform", text="Paket kimliği / durum")
+        catalog_tree.column("#0", width=270, stretch=False)
+        catalog_tree.column("platform", width=650)
+        catalog_scroll = ttk.Scrollbar(catalog_frame, orient="vertical", command=catalog_tree.yview)
+        catalog_tree.configure(yscrollcommand=catalog_scroll.set)
+        catalog_tree.pack(side="left", fill="both", expand=True)
+        catalog_scroll.pack(side="right", fill="y")
+        available_managers = self.available_package_managers()
+        for name in MCP_APPLICATION_CATALOG:
+            manager_labels = ", ".join(available_managers) or "Paket yöneticisi bulunamadı"
+            package = MCP_APP_PACKAGE_IDS.get(name, {}).get(available_managers[0], "arama ile bulunur") if available_managers else "kurulum mevcut değil"
+            catalog_tree.insert("", "end", iid=name, text=name, values=(f"{manager_labels} · {package}",))
+        catalog_actions = ttk.Frame(catalog_tab)
+        catalog_actions.pack(fill="x", pady=(10, 0))
+        manager_var = tk.StringVar(value=available_managers[0] if available_managers else "")
+        ttk.Label(catalog_actions, text="Paket yöneticisi:").pack(side="left")
+        manager_box = ttk.Combobox(
+            catalog_actions, textvariable=manager_var, values=available_managers,
+            state="readonly", width=16,
+        )
+        manager_box.pack(side="left", padx=6)
+        ttk.Button(
+            catalog_actions, text="Seçili uygulamayı kur",
+            command=lambda: install_selected_app(),
+        ).pack(side="left", padx=6)
+        ttk.Button(
+            catalog_actions,
+            text="7-Zip ile hafif kurulum testi",
+            command=lambda: select_lightweight_test_app(),
+        ).pack(side="left", padx=6)
+        ttk.Button(
+            catalog_actions, text="Resmi .dmg/.pkg indirme sayfası",
+            command=lambda: open_official_download(),
+        ).pack(side="left", padx=6)
+        ttk.Label(
+            catalog_actions, text=f"{len(MCP_APPLICATION_CATALOG)} katalog girdisi · kurulumdan önce onay alınır",
+        ).pack(side="right")
+
+        server_tree = ttk.Treeview(security_tab, columns=("application",), show="tree headings", height=12)
+        server_tree.heading("#0", text="MCP sunucusu")
+        server_tree.heading("application", text="Bağlı uygulama")
+        server_tree.column("#0", width=300)
+        server_tree.column("application", width=380)
+        server_tree.pack(fill="x", expand=False)
+        servers = self.list_servers()
+        for server in servers:
+            server_tree.insert(
+                "", "end", iid=str(server["id"]), text=server["name"],
+                values=(server["app_name"],),
+            )
+        permission_vars = {
+            "allow_app_status": tk.BooleanVar(value=False),
+            "allow_launch_application": tk.BooleanVar(value=False),
+            "allow_close_application": tk.BooleanVar(value=False),
+            "allow_screen_capture": tk.BooleanVar(value=False),
+            "allow_input_control": tk.BooleanVar(value=False),
+        }
+        permission_labels = {
+            "allow_app_status": "AI uygulama/süreç durumunu okuyabilsin",
+            "allow_launch_application": "AI uygulamayı başlatabilsin",
+            "allow_close_application": "AI uygulamayı kapatabilsin",
+            "allow_screen_capture": "AI ekran görüntüsü alabilsin",
+            "allow_input_control": "AI fare/klavye ile işlem yapabilsin",
+        }
+        permission_frame = ttk.LabelFrame(
+            security_tab, text="Seçili MCP için izinler (varsayılan: kapalı)", padding=12,
+        )
+        permission_frame.pack(fill="x", pady=(12, 0))
+        for key, variable in permission_vars.items():
+            ttk.Checkbutton(
+                permission_frame, text=permission_labels[key], variable=variable,
+            ).pack(anchor="w", pady=3)
+        security_actions = ttk.Frame(security_tab)
+        security_actions.pack(fill="x", pady=10)
+
+        def selected_server():
+            selection = server_tree.selection()
+            return self.get_server_by_id(int(selection[0])) if selection else None
+
+        def load_server_permissions(_event=None):
+            server = selected_server()
+            current = self.server_settings(server) if server else self.default_server_settings()
+            for key, variable in permission_vars.items():
+                variable.set(current[key])
+
+        def save_server_permissions():
+            server = selected_server()
+            if not server:
+                messagebox.showinfo("MCP seçimi", "Önce kayıtlı bir MCP seçin.", parent=root)
+                return
+            updated = self.update_server_settings(
+                server["id"], **{key: variable.get() for key, variable in permission_vars.items()}
+            )
+            messagebox.showinfo(
+                "Ayarlar kaydedildi",
+                f"{server['name']} izinleri güncellendi.\n"
+                f"Ekran: {'açık' if updated['allow_screen_capture'] else 'kapalı'} · "
+                f"Fare/klavye: {'açık' if updated['allow_input_control'] else 'kapalı'}",
+                parent=root,
+            )
+
+        server_tree.bind("<<TreeviewSelect>>", load_server_permissions)
+        ttk.Button(
+            security_actions, text="İzinleri kaydet", command=save_server_permissions,
+        ).pack(side="left")
+        ttk.Label(
+            security_tab,
+            text="Uygulama başlatma/kapatma, ekran ve fare/klavye izinleri her MCP için ayrı saklanır. "
+            "Ekran/klavye erişimi için işletim sisteminin gizlilik izinleri de gerekebilir.",
+            wraplength=900,
+        ).pack(anchor="w", pady=(4, 0))
+
+        def create_server_for_selected():
+            selection = installed_tree.selection()
+            if not selection:
+                messagebox.showinfo("Uygulama seçin", "Önce yüklü uygulamalardan birini seçin.", parent=root)
+                return
+            app = next((item for item in installed_apps if item["executable"] == selection[0]), None)
+            if not app:
+                return
+            name = simpledialog.askstring(
+                "MCP oluştur", "MCP sunucusu adı:", initialvalue=app["name"], parent=root,
+            )
+            if not name:
+                return
+            try:
+                server = self.create_server(name, app)
+            except (OSError, ValueError, sqlite3.IntegrityError) as error:
+                messagebox.showerror("MCP oluşturulamadı", str(error), parent=root)
+                return
+            server_tree.insert(
+                "", "end", iid=str(server["id"]), text=server["name"],
+                values=(server["app_name"],),
+            )
+            server_tree.selection_set(str(server["id"]))
+            notebook.select(security_tab)
+            load_server_permissions()
+            messagebox.showinfo("MCP oluşturuldu", f"{server['name']} MCP'si kaydedildi.", parent=root)
+
+        def selected_catalog_name():
+            selection = catalog_tree.selection()
+            return selection[0] if selection else None
+
+        def install_selected_app():
+            app_name = selected_catalog_name()
+            manager = manager_var.get()
+            if not app_name:
+                messagebox.showinfo("Uygulama seçin", "Önce katalogdan uygulama seçin.", parent=root)
+                return
+            if not manager:
+                messagebox.showerror("Paket yöneticisi yok", "Bu sistemde desteklenen paket yöneticisi bulunamadı.", parent=root)
+                return
+            try:
+                candidates = self.search_catalog_packages(app_name, manager)
+            except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
+                messagebox.showerror("Paket araması başarısız", str(error), parent=root)
+                return
+            if not candidates:
+                messagebox.showerror(
+                    "Paket bulunamadı",
+                    f"{app_name} için {manager} deposunda eşleşme bulunamadı. "
+                    "macOS'ta resmi indirme sayfasını açıp .dmg/.pkg yükleyicisini kullanabilirsiniz.",
+                    parent=root,
+                )
+                return
+            if len(candidates) > 1:
+                package_id = simpledialog.askstring(
+                    "Paket kimliği",
+                    "Listeden kurulacak paket kimliğini yazın:\n"
+                    + "\n".join(
+                        f"{item['name']} — {item['id']}" for item in candidates[:20]
+                    ),
+                    initialvalue=candidates[0]["id"], parent=root,
+                )
+                if not package_id:
+                    return
+                if package_id not in {item["id"] for item in candidates}:
+                    messagebox.showerror("Geçersiz paket", "Arama sonuçlarından bir paket kimliği seçin.", parent=root)
+                    return
+            selected_package = next(
+                item for item in candidates if item["id"] == package_id
+            ) if len(candidates) > 1 else candidates[0]
+            package_id = selected_package["id"]
+            package_name = selected_package["name"]
+            if not messagebox.askyesno(
+                "Kurulum onayı",
+                f"{app_name} için bulunan '{package_name}' paketini {manager} üzerinden "
+                "kurmak istiyor musunuz?\n\n"
+                f"Paket kimliği: {package_id}\n"
+                "Paket yöneticisi sistemde yönetici izni isteyebilir.",
+                parent=root,
+            ):
+                return
+
+            def perform_install():
+                try:
+                    result = self.install_package(manager, package_id)
+                    output = (result.stdout + "\n" + result.stderr).strip()
+                    root.after(
+                        0,
+                        lambda: messagebox.showinfo(
+                            "Kurulum tamamlandı" if result.returncode == 0 else "Kurulum başarısız",
+                            f"{package_name} ({package_id})\n\n"
+                            f"{output[-5000:] or f'Çıkış kodu: {result.returncode}'}",
+                            parent=root,
+                        ),
+                    )
+                except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                    error_message = str(error)
+                    root.after(
+                        0,
+                        lambda message=error_message: messagebox.showerror(
+                            "Kurulum başarısız", message, parent=root
+                        ),
+                    )
+
+            threading.Thread(target=perform_install, daemon=True).start()
+
+        def select_lightweight_test_app():
+            if "7-Zip" not in catalog_tree.get_children(""):
+                messagebox.showerror(
+                    "Test uygulaması bulunamadı",
+                    "7-Zip katalog girdisi bulunamadı.",
+                    parent=root,
+                )
+                return
+            if not available_managers:
+                messagebox.showerror(
+                    "Paket yöneticisi yok",
+                    "Bu sistemde desteklenen paket yöneticisi bulunamadı.",
+                    parent=root,
+                )
+                return
+            manager_var.set(
+                "winget" if "winget" in available_managers else available_managers[0]
+            )
+            catalog_tree.selection_set("7-Zip")
+            catalog_tree.focus("7-Zip")
+            catalog_tree.see("7-Zip")
+            notebook.select(catalog_tab)
+            install_selected_app()
+
+        def open_official_download():
+            app_name = selected_catalog_name()
+            url = MCP_APP_DOWNLOAD_PAGES.get(app_name)
+            if sys.platform != "darwin":
+                messagebox.showinfo(
+                    "macOS yükleyicisi",
+                    ".dmg/.pkg doğrudan yükleyici bağlantıları macOS için tasarlanmıştır.",
+                    parent=root,
+                )
+            elif not url:
+                messagebox.showinfo(
+                    "Resmi indirme sayfası yok",
+                    "Bu katalog uygulaması için doğrulanmış indirme sayfası tanımlanmamış.",
+                    parent=root,
+                )
+            else:
+                webbrowser.open(url)
+
+        root.mainloop()
 
     def _select_application(self, applications):
         if HAS_PROMPT_TOOLKIT and sys.stdin.isatty():
@@ -1813,15 +2856,24 @@ class MCPManager:
         )
         if HAS_RICH and self.console:
             self.console.print(Panel(details, title="MCP Sunucusu", border_style="cyan"))
-            vscode_config = json.dumps(json.loads(configuration)["vscode"], ensure_ascii=False, indent=2)
-            antigravity_config = json.dumps(json.loads(configuration)["antigravity"], ensure_ascii=False, indent=2)
+            configuration_data = json.loads(configuration)
+            vscode_config = json.dumps(configuration_data["vscode"], ensure_ascii=False, indent=2)
+            antigravity_config = json.dumps(configuration_data["antigravity"], ensure_ascii=False, indent=2)
             self.console.print(Panel(Syntax(vscode_config, "json", theme="monokai", word_wrap=True), title="VS Code mcp.json", border_style="green"))
             self.console.print(Panel(Syntax(antigravity_config, "json", theme="monokai", word_wrap=True), title="Antigravity MCP config", border_style="green"))
-            self._print_info("İlgili yapılandırma bloğunu istemcinizin MCP ayarına ekleyin; istemci stdio sunucusunu arka planda başlatır.")
+            http_url = configuration_data.get("http", {}).get("url", "")
+            if http_url:
+                self.console.print(Panel(http_url, title="Yerel Streamable HTTP MCP uç noktası", border_style="green"))
+            self._print_info(
+                "VS Code / Antigravity stdio yapılandırmasını kendi MCP ayarlarına ekler. "
+                "Yerel HTTP uç noktası yalnızca aynı bilgisayardaki istemcilere açıktır; "
+                "bulut MCP istemcileri bu adrese erişemez. "
+                "Ekran ve fare/klavye izinleri /MCP ayarlar içinde varsayılan olarak kapalıdır."
+            )
         else:
             print(details)
             print(configuration)
-            print("MCP istemcisi yapılandırmayı yükleyince sunucuyu başlatır.")
+            print("Yerel sunucuyu >start MCP <ad> ile başlatın; güvenlik izinleri /MCP ayarlar içinden yönetilir.")
 
     def _ask(self, message, default=None):
         if HAS_RICH and self.console:
@@ -1863,6 +2915,19 @@ class MCPManager:
 
     @staticmethod
     def _running_processes(executable):
+        if os.name != "nt":
+            result = subprocess.run(
+                ["ps", "-axo", "pid=,comm="],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+            )
+            image_name = Path(executable.removeprefix("@open:")).name.casefold()
+            return [
+                {"image": Path(line.strip().split(maxsplit=1)[1]).name, "pid": int(line.strip().split(maxsplit=1)[0])}
+                for line in result.stdout.splitlines()
+                if len(line.strip().split(maxsplit=1)) == 2
+                and Path(line.strip().split(maxsplit=1)[1]).name.casefold() == image_name
+                and line.strip().split(maxsplit=1)[0].isdigit()
+            ]
         image_name = Path(executable).name
         result = subprocess.run(
             ["tasklist", "/FI", f"IMAGENAME eq {image_name}", "/FO", "CSV", "/NH"],
@@ -1875,17 +2940,31 @@ class MCPManager:
         return running
 
     def launch_application(self, server):
+        if not self.server_settings(server)["allow_launch_application"]:
+            raise PermissionError(
+                "Uygulama başlatma izni kapalı. /MCP ayarlar penceresinden bu MCP için açın."
+            )
         executable = server["executable"]
-        if not Path(executable).is_file():
+        if executable.startswith("@open:"):
+            command = ["open", "-a", executable.removeprefix("@open:")]
+        elif os.name == "nt":
+            command = [executable]
+        else:
+            command = shlex.split(executable)
+        if not executable.startswith("@open:") and not (Path(command[0]).is_file() or shutil.which(command[0])):
             return f"Uygulama bulunamadı: {executable}"
         try:
-            process = subprocess.Popen([executable], close_fds=True)
+            process = subprocess.Popen(command, close_fds=True)
         except OSError as error:
             return f"Uygulama başlatılamadı: {error}"
         self._record_process(server["id"], process.pid)
         return f"{server['app_name']} başlatıldı (PID {process.pid})."
 
     def application_status(self, server):
+        if not self.server_settings(server)["allow_app_status"]:
+            raise PermissionError(
+                "Uygulama durumu izni kapalı. /MCP ayarlar penceresinden bu MCP için açın."
+            )
         try:
             running = self._running_processes(server["executable"])
         except OSError as error:
@@ -1899,7 +2978,75 @@ class MCPManager:
             "started_by_this_mcp": [item for item in running if item["pid"] in managed_ids],
         }
 
+    def capture_screen(self, server):
+        if not self.server_settings(server)["allow_screen_capture"]:
+            raise PermissionError("Ekran görüntüsü izni kapalı; /MCP ayarlar penceresinden açın.")
+        try:
+            from mss import MSS, tools
+            with MSS() as capture:
+                screenshot = capture.grab(capture.monitors[0])
+                image_data = tools.to_png(screenshot.rgb, screenshot.size)
+        except (ImportError, OSError, RuntimeError) as error:
+            raise RuntimeError(f"Ekran görüntüsü alınamadı: {error}") from error
+        return image_data
+
+    def click_screen(self, server, x, y, button="left", clicks=1):
+        if not self.server_settings(server)["allow_input_control"]:
+            raise PermissionError("Fare/klavye izni kapalı; /MCP ayarlar penceresinden açın.")
+        if button not in {"left", "right", "middle"} or not 1 <= clicks <= 2:
+            raise ValueError("Fare düğmesi left/right/middle, tıklama sayısı 1 veya 2 olmalıdır.")
+        try:
+            import pyautogui
+            width, height = pyautogui.size()
+            if not 0 <= x < width or not 0 <= y < height:
+                raise ValueError(f"Koordinatlar ekran sınırları dışında (0-{width - 1}, 0-{height - 1}).")
+            pyautogui.FAILSAFE = True
+            pyautogui.click(x=x, y=y, clicks=clicks, button=button)
+        except ImportError as error:
+            raise RuntimeError("Fare/klavye kontrol paketi eksik; uygulama bağımlılıklarını yükleyin.") from error
+        return f"{x},{y} koordinatına {button} tıklama gönderildi."
+
+    def type_into_screen(self, server, text):
+        if not self.server_settings(server)["allow_input_control"]:
+            raise PermissionError("Fare/klavye izni kapalı; /MCP ayarlar penceresinden açın.")
+        if not isinstance(text, str) or not text or len(text) > 2000:
+            raise ValueError("Metin 1-2000 karakter arasında olmalıdır.")
+        try:
+            import pyautogui
+            import pyperclip
+        except ImportError as error:
+            raise RuntimeError("Fare/klavye kontrol paketleri yüklenmemiş.") from error
+        old_clipboard = pyperclip.paste()
+        try:
+            pyperclip.copy(text)
+            pyautogui.FAILSAFE = True
+            pyautogui.hotkey("command", "v") if sys.platform == "darwin" else pyautogui.hotkey("ctrl", "v")
+        except (OSError, RuntimeError) as error:
+            raise RuntimeError(f"Metin yapıştırılamadı: {error}") from error
+        finally:
+            pyperclip.copy(old_clipboard)
+        return f"{len(text)} karakter etkin pencereye yazıldı."
+
+    def press_screen_key(self, server, key):
+        if not self.server_settings(server)["allow_input_control"]:
+            raise PermissionError("Fare/klavye izni kapalı; /MCP ayarlar penceresinden açın.")
+        if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9_]{1,20}", key):
+            raise ValueError("Tuş adı geçersiz.")
+        try:
+            import pyautogui
+            if key.lower() not in pyautogui.KEYBOARD_KEYS:
+                raise ValueError(f"Desteklenmeyen tuş: {key}")
+            pyautogui.FAILSAFE = True
+            pyautogui.press(key.lower())
+        except ImportError as error:
+            raise RuntimeError("Fare/klavye kontrol paketi yüklenmemiş.") from error
+        return f"{key} tuşu gönderildi."
+
     def close_application(self, server):
+        if not self.server_settings(server)["allow_close_application"]:
+            raise PermissionError(
+                "Uygulama kapatma izni kapalı. /MCP ayarlar penceresinden bu MCP için açın."
+            )
         try:
             running_ids = {item["pid"] for item in self._running_processes(server["executable"])}
         except OSError as error:
@@ -1910,11 +3057,19 @@ class MCPManager:
             return "Bu MCP sunucusunun başlattığı çalışan bir süreç yok; diğer uygulama örnekleri kapatılmadı."
         closed = []
         for pid in targets:
-            result = subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
-                capture_output=True, text=True, encoding="mbcs", errors="replace", check=False,
-            )
-            if result.returncode == 0:
+            if os.name == "nt":
+                result = subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    capture_output=True, text=True, encoding="mbcs", errors="replace", check=False,
+                )
+                succeeded = result.returncode == 0
+            else:
+                try:
+                    os.kill(pid, 15)
+                    succeeded = True
+                except OSError:
+                    succeeded = False
+            if succeeded:
                 closed.append(pid)
         if closed:
             with self._connect() as connection:
@@ -1927,7 +3082,7 @@ class MCPManager:
         return f"{server['app_name']} uygulamasının MCP tarafından başlatılan süreçleri kapatıldı: {closed}."
 
 
-def run_mcp_server(server_id):
+def run_mcp_server(server_id, transport="stdio", port=8800):
     manager = MCPManager()
     try:
         server = manager.get_server_by_id(int(server_id))
@@ -1940,9 +3095,13 @@ def run_mcp_server(server_id):
     mcp = FastMCP(
         name=server["name"],
         instructions=(
-            f"{server['app_name']} masaüstü uygulamasını yönet. "
-            "Yalnızca bu MCP sunucusunun başlattığı süreçleri kapat."
+            f"{server['app_name']} MCP'si. Ekran ve fare/klavye araçları varsayılan olarak kapalıdır; "
+            "yalnızca bu sunucuya kullanıcının açıkça verdiği izinleri kullan. "
+            "Uygulama kapatmayı yalnızca bu MCP'nin başlattığı süreçlerle sınırla. "
+            "Keyfi kabuk komutu çalıştırma aracı sunulmaz."
         ),
+        host="127.0.0.1",
+        port=port,
     )
 
     @mcp.tool()
@@ -1960,12 +3119,41 @@ def run_mcp_server(server_id):
         """Close only application processes started by this MCP server."""
         return manager.close_application(server)
 
-    mcp.run(transport="stdio")
+    @mcp.tool()
+    def screen_capture():
+        """Return a screenshot when screen capture is enabled in this server's settings."""
+        from mcp.server.fastmcp import Image
+        return Image(data=manager.capture_screen(server), format="png")
+
+    @mcp.tool()
+    def click_at(x: int, y: int, button: str = "left", clicks: int = 1) -> str:
+        """Click the current desktop at a screen coordinate when input control is enabled."""
+        return manager.click_screen(server, x, y, button, clicks)
+
+    @mcp.tool()
+    def type_text(text: str) -> str:
+        """Paste text into the focused application when input control is enabled."""
+        return manager.type_into_screen(server, text)
+
+    @mcp.tool()
+    def press_key(key: str) -> str:
+        """Press one key by name when input control is enabled."""
+        return manager.press_screen_key(server, key)
+
+    if transport == "streamable-http" and not 1024 <= port <= 65535:
+        raise ValueError("MCP HTTP portu 1024-65535 arasında olmalıdır.")
+    mcp.run(transport=transport)
 
 
 def main():
-    if len(sys.argv) == 3 and sys.argv[1] == "--mcp-server":
-        run_mcp_server(sys.argv[2])
+    if len(sys.argv) >= 3 and sys.argv[1] == "--mcp-server":
+        import argparse
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument("--mcp-server", required=True)
+        parser.add_argument("--transport", choices=("stdio", "streamable-http"), default="stdio")
+        parser.add_argument("--port", type=int, default=8800)
+        args = parser.parse_args(sys.argv[1:])
+        run_mcp_server(args.mcp_server, transport=args.transport, port=args.port)
     else:
         KeepAwakeApp().run()
 

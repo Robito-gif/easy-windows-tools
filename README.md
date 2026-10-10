@@ -6,11 +6,11 @@ Copyright (C) 2026 Robin Güneş.
 
 **Current version:** 2.1.0
 
-It brings several useful Windows functions together in a single command-line application, including keeping the computer awake, controlling display behavior, recording the screen, running commands while preventing sleep, and managing MCP server configurations.
+It brings useful Windows functions together in a command-line application, including keeping the computer awake, controlling display behavior, recording the screen, and managing MCP servers. The MCP application center also discovers installed desktop apps and searches a 100-entry software catalog.
 
-> **Platform:** Windows
+> **Platform:** Windows (power and recording features); Windows, macOS, and supported Linux distributions (MCP application center)
 > **Language:** Python
-> **Interface:** Terminal / CLI
+> **Interface:** Terminal / CLI, with a graphical MCP settings window
 > **License:** GNU General Public License v3.0 (GPL-3.0)
 
 ---
@@ -205,21 +205,61 @@ This is useful for long-running scripts, builds, downloads, and other processes 
 
 ### 🔌 MCP Support
 
-Easy Windows Tools also includes MCP-related functionality.
+The MCP application center can discover installed desktop applications and search a
+100-entry application catalog. The catalog includes Godot, Unity Hub, Unreal Engine,
+Blender, Chrome, Visual Studio, Visual Studio Code, MCreator, SQLite, Blockbench,
+IntelliJ IDEA, and other development, design, media, and desktop tools.
 
-Create an MCP server for a supported Windows application:
+```text
+/MCP ayarlar
+```
+
+The window has tabs for discovered applications, the catalog, and per-server
+security permissions. The catalog includes a **“7-Zip ile hafif kurulum testi”**
+shortcut that selects the small 7-Zip package and starts the normal package
+search and confirmation flow; it does not install anything until you confirm.
+A catalog installation always shows the selected package
+name and package ID and requires confirmation before invoking the detected package
+manager. Package results are searched and verified against the package manager
+instead of treating a configured ID as proof that a package exists. On macOS,
+the official-download button opens a listed vendor page; it does not download or
+install a `.dmg`/`.pkg` automatically.
+
+Create a server for an already installed application:
 
 ```text
 /MCP create
 ```
+
+Configure it in a development MCP client using the displayed VS Code or Antigravity
+stdio configuration. The server provides generic application launch/status/close,
+screenshot, click, text-entry, and key-press tools; it does not provide
+application-specific project editing tools.
+
+Each server's permissions are off by default. Application status, application
+launch/close, screenshot capture, and mouse/keyboard input permissions can be
+changed separately in `/MCP ayarlar`. Permission changes are read from the database
+for each tool call, so disabling a permission takes effect without restarting the
+MCP server. Mouse/keyboard control also requires the declared `pyautogui` and
+`pyperclip` dependencies and may require operating-system privacy permissions.
+
+Start or stop a registered local Streamable HTTP MCP server:
+
+```text
+>start MCP <server name>
+>stop MCP <server name>
+```
+
+The HTTP server binds to `127.0.0.1` and startup performs an MCP initialization
+handshake before reporting success. This endpoint is local-only; cloud-hosted MCP
+clients need a separately secured, remotely reachable MCP endpoint and cannot
+connect to this loopback URL directly.
 
 View saved MCP servers and their configuration:
 
 ```text
 /my MCP's
 ```
-
-You can also inspect the configuration used by development environments such as VS Code and Antigravity.
 
 ---
 
@@ -376,6 +416,9 @@ to display the available commands.
 | `/ekran <numara>`  | Select a display for recording            |
 | `çalıştır <komut>` | Run a command while keeping Windows awake |
 | `/MCP create`      | Create an MCP server                      |
+| `/MCP ayarlar`     | Open the application catalog and security settings |
+| `>start MCP <name>`| Start a registered local MCP server       |
+| `>stop MCP <name>` | Stop a registered local MCP server        |
 | `/my MCP's`        | View MCP configurations                   |
 | `lisans`           | Show license and warranty details         |
 | `durum`            | Show current system status                |
