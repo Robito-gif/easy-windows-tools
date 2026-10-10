@@ -4,14 +4,14 @@
 
 Copyright (C) 2026 Robin Güneş.
 
-**Current version:** 2.1.0
+**Current version:** 2.2.0
 
 It brings useful Windows functions together in a command-line application, including keeping the computer awake, controlling display behavior, recording the screen, and managing MCP servers. The MCP application center also discovers installed desktop apps and searches a 100-entry software catalog.
 
 > **Platform:** Windows (power and recording features); Windows, macOS, and supported Linux distributions (MCP application center)
 > **Language:** Python
-> **Interface:** Terminal / CLI, with a graphical MCP settings window
-> **License:** GNU General Public License v3.0 (GPL-3.0)
+> **Interface:** Terminal / CLI, with graphical MCP and WebSocket settings windows
+> **License:** GNU General Public License v3 only (GPL-3.0-only)
 
 ---
 
@@ -263,6 +263,68 @@ View saved MCP servers and their configuration:
 
 ---
 
+### 🌐 Local WebSocket Connections (v2.2.0)
+
+Easy Windows Tools can host authenticated WebSocket connections on the local
+computer without internet access. Every connection binds only to `127.0.0.1`;
+remote computers cannot connect, and the app does not create an internet or
+public-network tunnel.
+
+Create a connection with `-websocket create` or `-websocket yapmak`, and manage
+saved connections with `>websocket ayarlar`. The separate settings window lets
+you create, edit, start, stop, delete, and regenerate the PIN for each connection.
+The setup form includes a connection name, type, port, and simultaneous-client
+limit. Use `/websocket başlat` or `/websocket start` to start every saved
+connection; add a name to start just one.
+
+Two local connection types are available:
+
+* **Application server:** a client authenticates and exchanges JSON request and
+  response messages with Easy Windows Tools. Other Python code can register a
+  request handler using `LocalWebSocketManager.register_message_handler`.
+* **Local tunnel / relay:** PIN-authenticated local clients send JSON messages to
+  each other through the named relay.
+
+Each connection gets a cryptographically generated 11-digit PIN. It is shown
+only once when created or regenerated; the database stores a salted scrypt hash,
+not the PIN itself. If it is lost, regenerate it in the settings window and update
+the client. Authentication is the first JSON message:
+
+```json
+{"type":"authenticate","pin":"01234567890"}
+```
+
+On success, the server replies with a JSON `authenticated` message. For application
+server connections, send `{"type":"ping"}` for a `pong` response, or send any JSON
+object to receive a JSON response (or a response from the registered Python
+handler). For relay connections, send
+`{"type":"message","sender":"app-name","payload":{"key":"value"}}`;
+other authenticated clients receive the payload, and the sender receives a
+`relay_ack` with the number of recipients.
+
+The local socket is not encrypted with TLS: loopback traffic remains on this
+computer, while the PIN authenticates clients. Do not bind or proxy it to a
+network interface or forward the port. Internet connectivity is not used by the
+running WebSocket services; installing the `websockets` Python dependency itself
+requires the usual package-install source unless already present.
+
+The manager is embedded in `easy_windows_tools.py` and remains available as
+`local_websocket.py` for compatibility. `websocket_standalone.py` is the separately
+packaged source copy for future applications that want to reuse this implementation:
+
+```python
+from websocket_standalone import LocalWebSocketManager
+
+manager = LocalWebSocketManager()
+```
+
+All copies remain under this project's **GPL-3.0-only** license. Reuse and
+redistribution must retain the license and copyright notices and comply with
+the included `LICENSE`; the reusable copy is not offered under a permissive
+or proprietary license.
+
+---
+
 ### 📊 System Status
 
 Check the current wake and display state:
@@ -420,6 +482,9 @@ to display the available commands.
 | `>start MCP <name>`| Start a registered local MCP server       |
 | `>stop MCP <name>` | Stop a registered local MCP server        |
 | `/my MCP's`        | View MCP configurations                   |
+| `/websocket başlat [ad]` / `/websocket start [name]` | Start all or one local WebSocket |
+| `>websocket ayarlar` | Open local WebSocket settings            |
+| `-websocket create` / `-websocket yapmak` | Create a local WebSocket |
 | `lisans`           | Show license and warranty details         |
 | `durum`            | Show current system status                |
 | `temizle`          | Clear the terminal                        |
@@ -500,7 +565,7 @@ Use system-level features carefully and review commands before executing them.
 
 Easy Windows Tools is licensed under the:
 
-GNU General Public License v3.0 (GPL-3.0)
+GNU General Public License v3 only (GPL-3.0-only)
 
 Copyright (C) 2026 Robin Güneş.
 
